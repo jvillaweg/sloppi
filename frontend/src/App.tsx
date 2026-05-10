@@ -10,16 +10,23 @@ export default function App() {
   const [editorContents, setEditorContents] = useState<string>('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [actions, setActions] = useState<ProposedAction[]>([]);
-  const [inFlight, setInFlight] = useState(false);
+  const [inFlight, setInFlight] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.createSession().then(({ sessionId, task }) => {
-      setSessionId(sessionId);
-      setTask(task);
-      setEditorContents(task.starter_code);
-      setLoading(false);
-    });
+    (async () => {
+      try {
+        const { sessionId: id, task: t } = await api.createSession();
+        setSessionId(id);
+        setTask(t);
+        setEditorContents(t.starter_code);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to start session');
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
   const handleSend = async (message: string) => {
@@ -70,6 +77,14 @@ export default function App() {
       setInFlight(false);
     }
   };
+
+  if (error) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-950 text-red-400 text-sm">
+        {error}
+      </div>
+    );
+  }
 
   if (loading) {
     return (
