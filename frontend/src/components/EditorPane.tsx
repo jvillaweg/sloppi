@@ -15,6 +15,7 @@ export function EditorPane({ task, editorContents, sessionId }: Props) {
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
 
   const handleMount: OnMount = (editor) => {
@@ -32,9 +33,12 @@ export function EditorPane({ task, editorContents, sessionId }: Props) {
   const runTests = async () => {
     if (!sessionId) return;
     setRunning(true);
+    setTestError(null);
     try {
       const result = await api.runTests(sessionId);
       setTestResult(result);
+    } catch (err) {
+      setTestError(err instanceof Error ? err.message : 'Test run failed');
     } finally {
       setRunning(false);
     }
@@ -99,6 +103,12 @@ export function EditorPane({ task, editorContents, sessionId }: Props) {
                 {testResult.stderr}
               </pre>
             )}
+          </div>
+        )}
+
+        {testError && (
+          <div className="rounded bg-gray-900 p-3 text-xs text-red-400">
+            {testError}
           </div>
         )}
       </div>
