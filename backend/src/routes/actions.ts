@@ -17,6 +17,10 @@ actionsRouter.post('/apply-action', (req, res) => {
     return res.status(404).json({ error: 'Action not found', code: 'action_not_found' });
   }
 
+  if (action.status !== 'pending') {
+    return res.status(409).json({ error: 'Action is not pending', code: 'action_not_pending' });
+  }
+
   const currentHash = computeHash(session.editor_contents);
   if (currentHash !== action.proposed_at_editor_hash) {
     action.status = 'stale';
@@ -24,11 +28,14 @@ actionsRouter.post('/apply-action', (req, res) => {
     return res.json({ applied: false, reason: 'stale' });
   }
 
-  session.editor_contents = applyToolCall(
-    session.editor_contents,
-    action.tool,
-    action.args,
-  );
+  let newContents: string;
+  try {
+    newContents = applyToolCall(session.editor_contents, action.tool, action.args);
+  } catch {
+    return res.status(422).json({ applied: false, reason: 'apply_error', code: 'apply_error' });
+  }
+
+  session.editor_contents = newContents;
   action.status = 'applied';
   appendEvent(session, { type: 'action_applied', actionId, ts: Date.now() });
 
@@ -50,6 +57,10 @@ actionsRouter.post('/reject-action', (req, res) => {
   const action = session.proposed_actions.find((a) => a.id === actionId);
   if (!action) {
     return res.status(404).json({ error: 'Action not found', code: 'action_not_found' });
+  }
+
+  if (action.status !== 'pending') {
+    return res.status(409).json({ error: 'Action is not pending', code: 'action_not_pending' });
   }
 
   action.status = 'rejected';
