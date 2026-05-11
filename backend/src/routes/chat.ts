@@ -52,12 +52,21 @@ chatRouter.post('/chat', async (req, res) => {
   session.conversation.push({ role: 'user', content: message, ts });
   appendEvent(session, { type: 'user_prompt', content: message, ts });
 
-  // Inject tool_result turn if the previous assistant turn used tools
+  // Inject tool_result turn if the previous assistant turn used tools.
+  // Merge the user message text into the same user turn to avoid two consecutive user turns,
+  // which the Anthropic API rejects.
   const toolResultTurn = buildToolResultTurn(session);
-  if (toolResultTurn) {
-    session.rawHistory.push(toolResultTurn);
+  if (toolResultTurn && Array.isArray(toolResultTurn.content)) {
+    session.rawHistory.push({
+      role: 'user',
+      content: [
+        ...(toolResultTurn.content as Anthropic.ToolResultBlockParam[]),
+        { type: 'text', text: message },
+      ],
+    });
+  } else {
+    session.rawHistory.push({ role: 'user', content: message });
   }
-  session.rawHistory.push({ role: 'user', content: message });
 
   let claudeResponse;
   try {
