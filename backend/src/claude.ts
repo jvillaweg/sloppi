@@ -13,7 +13,7 @@ const TOOLS: Anthropic.Tool[] = [
       properties: {
         code: { type: 'string', description: 'The code to insert' },
         position: { type: 'string', enum: ['start', 'end', 'line'], description: 'Where to insert' },
-        line_number: { type: 'integer', description: 'Required if position is "line". 1-indexed.' },
+        line_number: { type: 'integer', description: 'Required if position is "line". 1-indexed. Inserts before this line, shifting existing content down.' },
         explanation: { type: 'string', description: '1-sentence rationale shown to user' },
       },
       required: ['code', 'position', 'explanation'],

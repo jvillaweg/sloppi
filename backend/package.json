@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
-    "@types/diff": "^5.2.3",
+    "@types/diff": "^7.0.0",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.0.0",
