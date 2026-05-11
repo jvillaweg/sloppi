@@ -1,6 +1,6 @@
 # Engineering Task 01 — IDE Shell with AI Sidebar
 
-**Status:** Spec v0.1
+**Status:** Spec v0.2
 **Owner:** TBD (engineering)
 **Predecessor:** PRD v0.5
 **Goal:** End-to-end working web app where a candidate sees a coding task, talks to an AI in a side panel, and the AI populates a read-only editor via structured code actions. No seeding, no scoring, no auth, no persistence beyond the session.
@@ -46,8 +46,11 @@ These are layered in subsequent tasks. Do not pre-build them.
 
 - **Frontend:** React 18 + TypeScript, Vite, Monaco Editor (`@monaco-editor/react`), Tailwind for styling
 - **Backend:** Node.js + Express (or Fastify), TypeScript
-- **LLM:** Anthropic API, Claude Sonnet (current). Use the official `@anthropic-ai/sdk`. API key via env var.
-- **Code execution sandbox:** for this slice, Docker container per request. **Custom image based on `python:3.12-slim` with `fastapi`, `httpx`, and `pytest` pre-installed.** Network disabled, 5s CPU limit, 256MB memory. Buy-vs-build deferred per PRD; this is throwaway exec for the spike.
+  - Add `cors` middleware configured to allow `http://localhost:5173` only. Do not use wildcard.
+  - Add `MOCK_SANDBOX=true` env var support: when set, `POST /api/run-tests` returns a hardcoded success response without touching Docker. Allows frontend development without Docker Desktop running.
+- **LLM:** Anthropic API, Claude Sonnet (current). Use the official `@anthropic-ai/sdk`. API key via env var. `max_tokens: 4096` per call.
+- **Code execution sandbox:** Docker container per request. **Custom image based on `python:3.12-slim` with `fastapi`, `httpx`, and `pytest` pre-installed.** Network disabled, 5s CPU limit, 256MB memory. Building this image is part of this slice — see AC #10.
+  - Container mounts: backend writes `solution.py` (current editor contents) and `test_solution.py` (from `tasks/task-01/`) into a temp dir per request, then bind-mounts that dir read-only to `/sandbox/` inside the container. `pytest` runs from `/sandbox/`.
 - **State:** server-side in-memory `Map<sessionId, SessionState>`. Sessions live until process restart. Acceptable for this slice.
 
 ---
@@ -137,10 +140,11 @@ The AI does not return code in markdown blocks for the frontend to parse. It use
 3. Claude responds with either:
    - A pure text message → render in chat as assistant turn
    - One or more tool calls → render each as a **proposed change card** in chat (with diff preview, Apply / Reject buttons)
-   - A mix (text + tool calls) → render text first, then cards
-4. Candidate clicks Apply on a card → frontend sends POST `/api/apply-action` with the action ID → backend validates against current editor state, applies the diff, returns new editor contents + updated session state
-5. Candidate clicks Reject → frontend sends POST `/api/reject-action` → backend logs the rejection, no editor change
-6. Until the candidate decides on a pending action, further prompts are allowed — but pending actions remain valid only against the editor state they were proposed against. If a later Apply would conflict with the current state, the action is invalidated and the user sees "this suggestion is stale, ask again."
+   - A mix (text + tool calls) → backend normalizes to text blocks first, then action cards, regardless of model output order
+4. For each tool call in the response, the **backend immediately computes a unified diff** of the proposed change against the current editor contents and a **SHA-256 hash of the current editor contents** (`proposed_at_editor_hash`). Both are stored on the `ProposedAction` and returned to the frontend. The frontend renders the diff string directly — it does not compute diffs.
+5. Candidate clicks Apply on a card → frontend sends POST `/api/apply-action` with the action ID → backend checks `proposed_at_editor_hash` against the current `SHA-256(editor_contents)`. If they differ, return `{ applied: false, reason: "stale" }`. If they match, apply the diff, update editor state, return new contents + updated session state.
+6. Candidate clicks Reject → frontend sends POST `/api/reject-action` → backend logs the rejection, no editor change.
+7. Staleness is checked **at Apply time only**. The backend does not proactively invalidate pending cards when another card is applied. When the user clicks Apply on card B after card A was already applied, the hash check catches it and returns stale.
 
 ### Editor state in the LLM context
 
@@ -152,6 +156,8 @@ Every call to Claude includes the current full editor contents in the system pro
 
 All endpoints JSON. Session ID in body or header. No auth.
 
+All error responses use the shape: `{ error: string, code: string }` with an appropriate HTTP status code. Example: `{ error: "Anthropic API unavailable", code: "llm_error" }`. Use consistent `code` strings so the frontend can branch without parsing error message strings.
+
 ```
 POST /api/session
   body: {}
@@ -162,11 +168,17 @@ POST /api/chat
   body: { sessionId, message: string }
   returns: { messages: ChatMessage[], pending_actions: ProposedAction[] }
   Forwards message + history + current editor + tool schemas to Claude.
-  Returns assistant turn (text + tool_use blocks transformed into ProposedAction objects).
+  Returns assistant turn (text + tool_use blocks normalized to text-first order, tool calls
+  transformed into ProposedAction objects). pending_actions contains ALL pending actions
+  for the session (status "pending"), not only those proposed in this response.
+  Only one in-flight request per session is allowed — the frontend disables the input
+  while a request is in progress.
 
 POST /api/apply-action
   body: { sessionId, actionId }
   returns: { editor_contents: string, applied: true } | { applied: false, reason: "stale" | ... }
+  Staleness check: SHA-256(current editor_contents) must equal the action's
+  proposed_at_editor_hash. Checked at apply time only.
 
 POST /api/reject-action
   body: { sessionId, actionId, reason?: string }
@@ -175,7 +187,10 @@ POST /api/reject-action
 POST /api/run-tests
   body: { sessionId }
   returns: { stdout, stderr, exit_code, duration_ms }
-  Spins up the sandbox, writes editor contents + test file, runs `pytest`, returns results.
+  If MOCK_SANDBOX=true, returns hardcoded { stdout: "4 passed", stderr: "", exit_code: 0, duration_ms: 0 }.
+  Otherwise: writes editor_contents to a temp dir as solution.py, copies tasks/task-01/test_solution.py
+  into the same temp dir, bind-mounts the dir to /sandbox/ in the Docker container, runs
+  `pytest /sandbox/test_solution.py`, returns results. Temp dir is cleaned up after each run.
 
 GET /api/session/:sessionId/events
   returns: { events: Event[] }
@@ -191,11 +206,11 @@ type ChatMessage =
   | { role: "assistant"; content: string; ts: number };
 
 type ProposedAction = {
-  id: string;                    // uuid
+  id: string;                         // uuid
   tool: "insert_code" | "replace_block" | "delete_block" | "replace_file";
-  args: object;                  // matches tool schema
-  diff_preview: string;          // unified diff string
-  proposed_at_editor_hash: string;  // for staleness check
+  args: object;                       // matches tool schema
+  diff_preview: string;               // unified diff string, computed by backend at proposal time
+  proposed_at_editor_hash: string;    // SHA-256 of editor_contents at proposal time
   status: "pending" | "applied" | "rejected" | "stale";
   ts: number;
 };
@@ -228,12 +243,16 @@ Single page. Two-pane layout:
 
 - **Left pane (60% width):**
   - Task title + problem statement (collapsible header, 100px tall when collapsed)
-  - Monaco editor, **read-only** (`options={{ readOnly: true }}`). Critical: the read-only flag must come from a single config constant, e.g. `EDITOR_INPUT_PERMISSION = "ai_only" | "joint" | "manual"`. v2 flips this to `"joint"` without touching the editor component. **Do not hardcode `readOnly: true` in the JSX.**
-  - "Run Tests" button below the editor → calls `/api/run-tests`, shows output in a panel
+  - Monaco editor, **read-only** (`options={{ readOnly: true, contextmenu: false }}`). `readOnly` and `contextmenu` must come from a single config constant, e.g. `EDITOR_INPUT_PERMISSION = "ai_only" | "joint" | "manual"`. v2 flips this to `"joint"` without touching the editor component. **Do not hardcode these flags directly in the JSX.** Setting `contextmenu: false` closes the right-click paste loophole while still allowing selection and copy.
+  - "Run Tests" button below the editor → calls `/api/run-tests`, shows output in a panel. Available at all times — failing fast is signal.
 - **Right pane (40% width):**
   - Chat history (scrollable)
   - Pending action cards rendered inline in the chat history at their proposal point. Each card shows: tool name, explanation, diff preview (use `react-diff-viewer-continued` or similar), Apply button, Reject button
-  - Input box at bottom, Send button
+  - Input box at bottom, Send button. **Input and Send button are disabled while a chat request is in flight.** Re-enable on response or error.
+
+### Session ID
+
+On app load, call `POST /api/session` once and store the returned `sessionId` in React state (`useState`). Do not persist it to `localStorage`, `sessionStorage`, or the URL. Sessions are ephemeral; a refresh starts a new session. This is acceptable for this slice.
 
 ### Editor write API (frontend-side abstraction)
 
@@ -254,14 +273,14 @@ All edits go through `applyAction`. This is the choke point. v2 will add `applyM
 
 ## 7. The hardcoded task (for this slice)
 
-Pick something small but recognizably web-shaped. Suggested:
+**Test file location:** `tasks/task-01/test_solution.py` in the repo root. The backend reads this file from disk when spinning up the sandbox. Do not embed it as a string constant in backend source — subsequent tasks will each have their own directory under `tasks/`.
 
 > **Title:** User search endpoint
 > **Problem:** Implement a single FastAPI endpoint `GET /users/search?q=<term>` that searches an in-memory list of user records by name (case-insensitive substring match) and returns matching results as JSON. Empty query returns all users. Results should include `id`, `name`, and `email` only — never include the `password_hash` field that exists on the user records.
 >
 > **Starter code:** `solution.py` with the FastAPI app stub and a hardcoded `USERS` list (5–10 records, each with id, name, email, password_hash).
 >
-> **Test file:** uses FastAPI's `TestClient`:
+> **Test file:** `tasks/task-01/test_solution.py`:
 > ```python
 > from fastapi.testclient import TestClient
 > from solution import app
@@ -291,8 +310,6 @@ Pick something small but recognizably web-shaped. Suggested:
 
 Why this task for the spike: small enough to ship in one slice, web-shaped (HTTP endpoint, JSON response, request handling), and the `password_hash` test introduces the kind of "AI quietly leaks something" pattern that becomes the core of seeded adversarial tasks later. For this slice the AI is helpful and not seeded — but the task already exercises the right shape of code.
 
-The sandbox image needs `fastapi` and `pytest` and `httpx` pre-installed. Build a custom image as part of this slice.
-
 ---
 
 ## 8. Acceptance criteria
@@ -307,18 +324,23 @@ A developer running `npm run dev` on both frontend and backend can:
 6. Type "now exclude password_hash from the response" if Claude didn't catch it the first time — see another proposed action card
 7. Click Reject on any action — chat logs the rejection, editor unchanged
 8. GET `/api/session/:id/events` returns the full event log including the rejection
-9. Verify the editor cannot accept any keyboard input directly — typing in it does nothing
-10. Inspect the read-only enforcement: search the codebase for `readOnly: true`. There should be exactly one occurrence, driven by `EDITOR_INPUT_PERMISSION === "ai_only"`.
+9. Verify the editor cannot accept any keyboard input directly — typing in it does nothing, right-click context menu is disabled
+10. Verify the Monaco config flags (`readOnly`, `contextmenu`) are driven by `EDITOR_INPUT_PERMISSION`. Search the codebase for hardcoded `readOnly: true` — there should be exactly one occurrence, inside the constant derivation.
+11. Run `docker build` on the custom sandbox image — it succeeds. Run `pytest` inside it against the test file — it executes without missing dependency errors.
 
 ---
 
 ## 9. Notable decisions to flag during build
 
 - **Streaming:** for this slice, do not stream Claude responses. Wait for full response, then render. Streaming complicates tool-call handling and isn't worth it yet.
-- **Concurrency:** one in-flight chat request per session. If the user sends a second prompt while one is in flight, disable the input. Don't try to handle concurrent prompts.
-- **Action staleness:** if the editor has been modified between an action being proposed and applied (hash check), mark the action stale and force the user to re-prompt. Simpler than trying to rebase the diff.
-- **Error handling:** if Claude returns a malformed tool call (rare but possible), log it as `assistant_error` event and show the user "the AI proposed an invalid change, please try again." Do not retry automatically.
-- **Cost control:** hardcoded `max_tokens: 2048` per Claude call for this slice. Rough cost: <$0.05 per session. Acceptable for development.
+- **Concurrency:** one in-flight chat request per session. Disable the input and Send button while a request is in flight. Do not queue or cancel.
+- **Action staleness:** staleness is checked at Apply time by comparing `SHA-256(current editor_contents)` against `proposed_at_editor_hash`. The backend does not proactively invalidate other pending cards when one is applied — the hash check at Apply time is sufficient. If stale, return `{ applied: false, reason: "stale" }` and the user sees "this suggestion is stale, ask again."
+- **Mixed response normalization:** when Claude returns a mix of text and tool_use content blocks, the backend reorders them — all text blocks first, then action cards — before returning to the frontend. The frontend always receives a consistent order regardless of model output order.
+- **Diff preview:** generated by the backend at proposal time (when the tool call is received), not at Apply time. The frontend renders the pre-computed diff string.
+- **Error handling:** if Claude returns a malformed tool call (rare but possible), log it as `assistant_error` event and show the user "the AI proposed an invalid change, please try again." Do not retry automatically. All API error responses use `{ error: string, code: string }`.
+- **Cost control:** hardcoded `max_tokens: 4096` per Claude call for this slice. Rough cost: <$0.10 per session. Acceptable for development.
+- **CORS:** backend uses the `cors` npm package with `origin: 'http://localhost:5173'`. Not wildcard.
+- **Sandbox mock:** set `MOCK_SANDBOX=true` to skip Docker entirely and return a hardcoded success response from `POST /api/run-tests`. Allows frontend development without Docker Desktop.
 
 ---
 
@@ -334,12 +356,3 @@ Once this ships:
 - **Task 07 — Auth + invite links:** customer admin login (email+pw) and tokenized candidate links.
 
 Each builds on the contracts defined here. Don't touch them out of order.
-
----
-
-## 11. Open questions for the implementer
-
-1. Do we want diff previews in the chat to show line numbers (matters more later, can be plain unified diff for now)?
-2. Should "Run Tests" be available before any code is in the editor, or gated until the editor has content? (Recommend: always available — fail fast is signal.)
-3. Monaco's `readOnly: true` still allows selection and copy. That's fine — we want candidates to be able to read and reference the code. Confirm this isn't a concern.
-4. Is the sandbox `python:3.12-slim` sufficient, or do we need `pytest` pre-installed in a custom image? (Probably custom image; build it as part of this slice.)

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.local
+
+# Development scripts
+backend/test-store.mjs
+backend/verify.ts
+
+# Claude internal
+.claude/
