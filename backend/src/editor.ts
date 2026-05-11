@@ -64,6 +64,7 @@ export function buildProposedAction(
 
   return {
     id: uuidv4(),
+    tool_use_id: toolUseBlock.id,
     tool: toolUseBlock.name as ProposedAction['tool'],
     args,
     diff_preview: diffPreview,

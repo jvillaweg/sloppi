@@ -12,6 +12,7 @@ export function createSession(): SessionState {
     taskId: task.id,
     editor_contents: task.starter_code,
     conversation: [],
+    rawHistory: [],
     proposed_actions: [],
     events: [{ type: 'session_start', ts: Date.now() }],
   };

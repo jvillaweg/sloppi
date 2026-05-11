@@ -79,16 +79,11 @@ ${session.editor_contents}
 
 Use the provided tools to suggest code modifications. Always include a brief explanation for each change.`;
 
-  const messages = session.conversation.map((msg) => ({
-    role: msg.role as 'user' | 'assistant',
-    content: msg.content,
-  }));
-
   return anthropic.messages.create({
     model: MODEL,
     max_tokens: 4096,
     system: systemPrompt,
     tools: TOOLS,
-    messages,
+    messages: session.rawHistory,
   });
 }

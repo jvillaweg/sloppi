@@ -1,3 +1,5 @@
+import type Anthropic from '@anthropic-ai/sdk';
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -6,6 +8,7 @@ export interface ChatMessage {
 
 export interface ProposedAction {
   id: string;
+  tool_use_id: string;
   tool: 'insert_code' | 'replace_block' | 'delete_block' | 'replace_file';
   args: Record<string, unknown>;
   diff_preview: string;
@@ -32,6 +35,7 @@ export interface SessionState {
   taskId: string;
   editor_contents: string;
   conversation: ChatMessage[];
+  rawHistory: Anthropic.MessageParam[];
   proposed_actions: ProposedAction[];
   events: AppEvent[];
 }
