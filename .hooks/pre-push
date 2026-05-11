@@ -1,0 +1,36 @@
+#!/bin/sh
+# Blocks push if CHANGELOG.md is not updated in the commits being pushed.
+
+zero_sha="0000000000000000000000000000000000000000"
+
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    # Skip deletes
+    [ "$local_sha" = "$zero_sha" ] && continue
+
+    # New branch: compare against merge-base with master/main
+    if [ "$remote_sha" = "$zero_sha" ]; then
+        base=$(git merge-base "$local_sha" origin/master 2>/dev/null \
+            || git merge-base "$local_sha" origin/main 2>/dev/null)
+        if [ -z "$base" ]; then
+            range="$local_sha"
+        else
+            range="$base..$local_sha"
+        fi
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    # No commits in range (already up to date) — allow
+    [ -z "$(git log --oneline "$range" 2>/dev/null)" ] && continue
+
+    # Check whether CHANGELOG.md was touched in any commit in the range
+    if ! git log --name-only --pretty=format: "$range" | grep -q "^CHANGELOG\.md$"; then
+        echo ""
+        echo "  Push blocked: CHANGELOG.md not updated."
+        echo "  Add an entry describing your changes, then commit it before pushing."
+        echo ""
+        exit 1
+    fi
+done
+
+exit 0
