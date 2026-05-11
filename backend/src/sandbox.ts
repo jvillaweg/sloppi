@@ -39,7 +39,7 @@ export function runTests(editorContents: string): Promise<TestResult> {
         '--cpus=0.5',
         '-v', `${tmpDir}:/sandbox:ro`,
         SANDBOX_IMAGE,
-        'pytest', '/sandbox/test_solution.py', '-v', '--tb=short',
+        'pytest', '/sandbox/test_solution.py', '-v', '--tb=short', '--timeout=5',
       ],
       { timeout: 15000 },
       (error, stdout, stderr) => {
